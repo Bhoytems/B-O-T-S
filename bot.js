@@ -1,15 +1,19 @@
-// trend-pulse-bot.js
-// Node.js Telegram Signal Bot for EUR/USD and GBP/USD
-// Sessions: Mon-Fri | 8:00-10:00 WAT & 13:00-18:00 WAT
+// ============================================
+// bot.js
+// ============================================
+// Trend Pulse Bot - Node.js Version
+// Deployable on Railway.app
+// Monitors EUR/USD and GBP/USD | Sessions: 8-10am & 1-6pm WAT (Mon-Fri)
 
 const axios = require('axios');
 const cron = require('node-cron');
-const fs = require('fs');
 
 // ======================= CONFIGURATION =======================
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'YOUR_BOT_TOKEN_HERE';
-const CHANNEL_ID = process.env.CHANNEL_ID || 'YOUR_CHANNEL_ID_HERE';
+// Read from environment variables (set in Railway dashboard)
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const CHANNEL_ID = process.env.CHANNEL_ID;
 const TWELVE_DATA_KEY = process.env.TWELVE_DATA_KEY || '2fb822c09c1c42e19c07e94090f18b42';
+const PORT = process.env.PORT || 3000;
 
 // Assets to monitor (only forex)
 const FOREX_ASSETS = ['EUR/USD', 'GBP/USD'];
@@ -19,6 +23,9 @@ const SESSIONS = [
   { start: 8, end: 10 },   // 8:00 AM - 10:00 AM
   { start: 13, end: 18 }   // 1:00 PM - 6:00 PM
 ];
+
+// Trading days: Monday = 1, Friday = 5
+const TRADING_DAYS = [1, 2, 3, 4, 5];
 
 // Tracking state
 let lastSignals = {};        // { asset: 'BUY'/'SELL'/'NEUTRAL' }
@@ -34,18 +41,15 @@ function isTradingActive() {
   const now = getWATTime();
   const day = now.getDay(); // 0=Sunday, 1=Monday, ..., 6=Saturday
   const hour = now.getHours();
-  const minute = now.getMinutes();
   
-  // Monday to Friday only (1-5)
-  if (day === 0 || day === 6) return false;
+  // Check if trading day (Monday to Friday)
+  if (!TRADING_DAYS.includes(day)) return false;
   
   // Check if within any session window
   for (const session of SESSIONS) {
     if (hour >= session.start && hour < session.end) {
       return true;
     }
-    // Handle session end time exactly (e.g., until 18:00, not including 18:01)
-    if (hour === session.end - 1 && minute >= 0) return true;
   }
   return false;
 }
@@ -53,26 +57,29 @@ function isTradingActive() {
 function getTradeWindowInfo() {
   const now = getWATTime();
   const minutes = now.getMinutes();
-  const seconds = now.getSeconds();
   
-  // Round to next 5-minute mark for signal (0,5,10,15,20,25,30,35,40,45,50,55)
+  // Round to next 5-minute mark (0,5,10,15,...55)
   const nextFiveMin = Math.ceil((minutes + 0.1) / 5) * 5;
   const nextSignalTime = new Date(now);
   nextSignalTime.setMinutes(nextFiveMin, 0, 0);
   
   // Entry window: 2 minutes after signal time
-  const entryStart = new Date(nextSignalTime);
   const entryEnd = new Date(nextSignalTime);
   entryEnd.setMinutes(entryEnd.getMinutes() + 2);
   
-  // Trade expiry: 7 minutes after signal time (not 7 minutes after entry)
+  // Trade expiry: 7 minutes after signal time
   const tradeExpiry = new Date(nextSignalTime);
   tradeExpiry.setMinutes(tradeExpiry.getMinutes() + 7);
   
   const timeUntilSignal = Math.max(0, (nextSignalTime - now) / 1000);
-  const isInEntryWindow = now >= entryStart && now < entryEnd;
+  const isInEntryWindow = now >= nextSignalTime && now < entryEnd;
   
-  return { nextSignalTime, entryStart, entryEnd, tradeExpiry, timeUntilSignal, isInEntryWindow };
+  return { nextSignalTime, entryEnd, tradeExpiry, timeUntilSignal, isInEntryWindow };
+}
+
+function formatPrice(price) {
+  if (!price) return '—';
+  return price.toFixed(5);
 }
 
 // ======================= TELEGRAM FUNCTIONS =======================
@@ -81,6 +88,7 @@ async function sendToChannel(message, isMarkdown = true) {
     console.log('[BOT] No valid BOT_TOKEN, would send:', message.substring(0, 100));
     return false;
   }
+  
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
   try {
     const response = await axios.post(url, {
@@ -99,18 +107,17 @@ async function sendToChannel(message, isMarkdown = true) {
 async function sendStatusUpdate() {
   const activeSignals = Object.keys(pendingSignals).length;
   const now = getWATTime();
-  const statusMsg = `🤖 *Bot Status* (${now.toLocaleTimeString('en-GB')})
+  const windowInfo = getTradeWindowInfo();
+  
+  const statusMsg = `🤖 *Trend Pulse Status*
   
 📊 Monitoring: EUR/USD, GBP/USD
-⏰ Next signal: ${getNextSignalTime()}
+⏰ Trading active: ${isTradingActive() ? '✅ YES' : '❌ NO'}
 📈 Active signals: ${activeSignals}
-🕒 Trading hours active: ${isTradingActive()}`;
+⏱ Next signal: ${windowInfo.nextSignalTime.toLocaleTimeString('en-GB')}
+🕒 Server time: ${now.toLocaleTimeString('en-GB')}`;
+  
   await sendToChannel(statusMsg, true);
-}
-
-function getNextSignalTime() {
-  const info = getTradeWindowInfo();
-  return info.nextSignalTime.toLocaleTimeString('en-GB');
 }
 
 // ======================= WIN/LOSS VERIFICATION =======================
@@ -250,11 +257,7 @@ async function analyzeAsset(asset) {
     const lastSignal = lastSignals[asset];
     const windowInfo = getTradeWindowInfo();
     
-    // Send signal only if:
-    // 1. Trend is not neutral
-    // 2. Signal changed (BUY->SELL or SELL->BUY or NEUTRAL->signal)
-    // 3. Within entry window (2 minutes after 5-min mark)
-    // 4. Trading session is active
+    // Send signal only if conditions met
     if (finalSignal !== 'NEUTRAL' && lastSignal !== finalSignal && 
         windowInfo.isInEntryWindow && isTradingActive()) {
       
@@ -274,7 +277,6 @@ async function analyzeAsset(asset) {
       if (sent) {
         lastSignals[asset] = finalSignal;
         
-        // Register pending signal for win/loss verification
         pendingSignals[asset] = {
           asset: asset,
           direction: finalSignal,
@@ -283,7 +285,7 @@ async function analyzeAsset(asset) {
           expiryTime: windowInfo.tradeExpiry,
           displayName: displayName
         };
-        console.log(`[SIGNAL] ${asset}: ${finalSignal} at ${formatPrice(currentPrice)} | Expires: ${windowInfo.tradeExpiry.toLocaleTimeString()}`);
+        console.log(`[SIGNAL] ${asset}: ${finalSignal} at ${formatPrice(currentPrice)}`);
       }
     } else if (finalSignal === 'NEUTRAL') {
       lastSignals[asset] = null;
@@ -302,7 +304,7 @@ async function runFullAnalysis() {
   
   const active = isTradingActive();
   if (!active) {
-    console.log(`[BOT] Trading session inactive. Sensors idle.`);
+    console.log(`[BOT] Trading session inactive. Idle until next session.`);
     isAnalyzing = false;
     return;
   }
@@ -314,7 +316,6 @@ async function runFullAnalysis() {
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   
-  // Check for expired signals
   checkExpiredSignals();
   
   const pendingCount = Object.keys(pendingSignals).length;
@@ -325,95 +326,106 @@ async function runFullAnalysis() {
   isAnalyzing = false;
 }
 
-function formatPrice(price) {
-  if (!price) return '—';
-  return price.toFixed(5);
-}
+// ======================= EXPRESS SERVER (Required for Railway) =======================
+const express = require('express');
+const app = express();
 
-// ======================= SESSION SCHEDULING =======================
-// Run every minute to catch the exact 5-minute marks
-function startScheduledAnalysis() {
-  // Run analysis every minute (to catch signal windows precisely)
-  cron.schedule('* * * * *', async () => {
-    const now = getWATTime();
-    const seconds = now.getSeconds();
-    const minutes = now.getMinutes();
-    
-    // Run analysis exactly at :00, :05, :10, etc. and also during entry window
-    const isSignalTime = minutes % 5 === 0;
-    const windowInfo = getTradeWindowInfo();
-    
-    if (isSignalTime && seconds < 10) {
-      // At the 5-minute mark, run analysis for signals
-      await runFullAnalysis();
-    } else if (windowInfo.isInEntryWindow) {
-      // During entry window, also run analysis to catch signals
-      await runFullAnalysis();
-    } else if (seconds === 30) {
-      // Run status check every minute at :30
-      const pendingCount = Object.keys(pendingSignals).length;
-      if (pendingCount > 0) {
-        checkExpiredSignals();
-      }
-    }
-  });
-}
-
-function startSessionMonitor() {
-  // Log session status every 5 minutes
-  cron.schedule('*/5 * * * *', async () => {
-    const active = isTradingActive();
-    const nextInfo = getTradeWindowInfo();
-    console.log(`[MONITOR] ${getWATTime().toLocaleTimeString()} | Trading: ${active ? 'ACTIVE' : 'IDLE'} | Next signal: ${nextInfo.nextSignalTime.toLocaleTimeString()}`);
-    
-    // Send status to Telegram every hour during active session
-    const now = getWATTime();
-    if (active && now.getMinutes() === 0) {
-      await sendStatusUpdate();
-    }
-  });
-}
-
-// ======================= INITIALIZATION =======================
-async function init() {
-  console.log('═══════════════════════════════════════════');
-  console.log('🤖 TREND PULSE BOT - Node.js Version');
-  console.log('═══════════════════════════════════════════');
-  console.log(`📊 Monitoring: ${FOREX_ASSETS.join(', ')}`);
-  console.log(`⏰ Session 1: 8:00 - 10:00 WAT (Mon-Fri)`);
-  console.log(`⏰ Session 2: 13:00 - 18:00 WAT (Mon-Fri)`);
-  console.log(`📡 Telegram Bot: ${BOT_TOKEN !== 'YOUR_BOT_TOKEN_HERE' ? 'CONFIGURED' : 'NOT SET'}`);
-  console.log('═══════════════════════════════════════════\n');
-  
-  if (BOT_TOKEN === 'YOUR_BOT_TOKEN_HERE') {
-    console.log('[WARN] Please set your TELEGRAM_BOT_TOKEN environment variable');
-    console.log('[WARN] Bot will run in simulation mode (no messages sent)');
-  }
-  
-  // Send startup message
-  await sendToChannel('🤖 *Trend Pulse Bot Started*\n\nMonitoring EUR/USD and GBP/USD\nSessions: 8:00-10:00 & 13:00-18:00 WAT (Mon-Fri)\n\n✅ Bot is live!', true);
-  
-  // Run initial analysis
-  await runFullAnalysis();
-  
-  // Start schedulers
-  startScheduledAnalysis();
-  startSessionMonitor();
-  
-  console.log('[BOT] Active and monitoring...');
-}
-
-// Handle graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\n[BOT] Shutting down gracefully...');
-  sendToChannel('🛑 *Bot Shutdown*\n\nTrend Pulse bot has been stopped.', true);
-  process.exit(0);
+app.get('/', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Trend Pulse Bot</title></head>
+    <body style="background:#0a0a0a;color:#00e599;font-family:monospace;text-align:center;padding:50px;">
+      <h1>🤖 Trend Pulse Bot</h1>
+      <p>Status: <strong style="color:#00ff88;">🟢 ONLINE</strong></p>
+      <p>Monitoring: EUR/USD, GBP/USD</p>
+      <p>Sessions: 8-10am & 1-6pm WAT (Mon-Fri)</p>
+      <p>Active signals: ${Object.keys(pendingSignals).length}</p>
+      <hr>
+      <small>Last scan: ${new Date().toLocaleTimeString()}</small>
+    </body>
+    </html>
+  `);
 });
 
-// Start the bot
-init().catch(console.error);
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'online', 
+    trading: isTradingActive(),
+    signals: Object.keys(pendingSignals).length,
+    time: getWATTime().toISOString()
+  });
+});
 
-// Keep process alive
-setInterval(() => {
-  // Heartbeat
-}, 60000);
+// Start HTTP server
+app.listen(PORT, () => {
+  console.log(`[SERVER] Health check available on port ${PORT}`);
+});
+
+// ======================= SCHEDULED TASKS =======================
+// Run every minute to check signal timing
+cron.schedule('* * * * *', async () => {
+  const now = getWATTime();
+  const minutes = now.getMinutes();
+  const seconds = now.getSeconds();
+  
+  // Run at exact 5-minute marks (0,5,10,...55)
+  if (minutes % 5 === 0 && seconds < 10) {
+    await runFullAnalysis();
+  }
+  // Also run during entry windows
+  const windowInfo = getTradeWindowInfo();
+  if (windowInfo.isInEntryWindow && seconds % 30 === 0) {
+    await runFullAnalysis();
+  }
+  // Check for expired signals every minute
+  if (seconds < 5) {
+    checkExpiredSignals();
+  }
+});
+
+// Status update every hour
+cron.schedule('0 * * * *', async () => {
+  if (isTradingActive()) {
+    await sendStatusUpdate();
+  }
+});
+
+// Morning session start notification (7:55 AM)
+cron.schedule('55 7 * * *', async () => {
+  const now = getWATTime();
+  if (TRADING_DAYS.includes(now.getDay())) {
+    await sendToChannel('🌅 *Morning Session Starting Soon*\n\nTrading session: 8:00 - 10:00 WAT\nMonitoring EUR/USD and GBP/USD\n\nGet ready!', true);
+  }
+});
+
+// Afternoon session start notification (12:55 PM)
+cron.schedule('55 12 * * *', async () => {
+  const now = getWATTime();
+  if (TRADING_DAYS.includes(now.getDay())) {
+    await sendToChannel('🌤 *Afternoon Session Starting Soon*\n\nTrading session: 13:00 - 18:00 WAT\nMonitoring active.\n\nHappy trading!', true);
+  }
+});
+
+// ======================= INITIALIZATION =======================
+console.log('═══════════════════════════════════════════');
+console.log('🤖 TREND PULSE BOT - Node.js Version');
+console.log('═══════════════════════════════════════════');
+console.log(`📊 Monitoring: ${FOREX_ASSETS.join(', ')}`);
+console.log(`⏰ Session 1: 8:00 - 10:00 WAT (Mon-Fri)`);
+console.log(`⏰ Session 2: 13:00 - 18:00 WAT (Mon-Fri)`);
+console.log(`📡 Telegram Bot: ${BOT_TOKEN && BOT_TOKEN !== 'YOUR_BOT_TOKEN_HERE' ? 'CONFIGURED ✅' : 'NOT SET ⚠️'}`);
+console.log(`🌐 Health check: http://localhost:${PORT}`);
+console.log('═══════════════════════════════════════════\n');
+
+// Send startup message
+if (BOT_TOKEN && BOT_TOKEN !== 'YOUR_BOT_TOKEN_HERE') {
+  setTimeout(async () => {
+    await sendToChannel('🤖 *Trend Pulse Bot Started*\n\n✅ Monitoring EUR/USD and GBP/USD\n⏰ Sessions: 8-10am & 1-6pm WAT (Mon-Fri)\n📊 Auto win/loss verification enabled\n\nBot is live and ready!', true);
+  }, 2000);
+} else {
+  console.log('[WARN] Please set TELEGRAM_BOT_TOKEN and CHANNEL_ID environment variables');
+  console.log('[WARN] Bot running in demo mode (no messages will be sent)');
+}
+
+console.log('[BOT] Active and monitoring...');
