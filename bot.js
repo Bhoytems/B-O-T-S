@@ -1,9 +1,3 @@
-// ============================================
-// bot.js
-// ============================================
-// Trend Pulse Bot - Node.js Version
-// Deployable on Railway.app
-// Monitors EUR/USD and GBP/USD | Sessions: 8-10am & 1-6pm WAT (Mon-Fri)
 
 const axios = require('axios');
 const cron = require('node-cron');
