@@ -1,0 +1,23 @@
+// ============================================
+// package.json
+// ============================================
+{
+  "name": "trend-pulse-bot",
+  "version": "1.0.0",
+  "description": "Telegram signal bot for EUR/USD and GBP/USD with auto win/loss verification",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.2",
+    "node-cron": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["forex", "signals", "telegram", "trading"],
+  "author": "Trend Pulse",
+  "license": "MIT"
+}
